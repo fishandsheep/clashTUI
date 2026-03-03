@@ -197,15 +197,14 @@ impl MihomoController {
     }
 }
 
-/// 简单的 URL 百分号编码
+/// URL 路径百分号编码（用于 URL 路径部分，空格编码为 %20 而不是 +）
 fn percent_encode(input: &str) -> String {
-    let mut result = String::with_capacity(input.len() * 2);
+    let mut result = String::with_capacity(input.len() * 3);
     for byte in input.bytes() {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 result.push(byte as char);
             }
-            b' ' => result.push('+'),
             _ => {
                 result.push_str(&format!("%{:02X}", byte));
             }

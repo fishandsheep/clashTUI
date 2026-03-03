@@ -304,36 +304,6 @@ impl App {
                     }
                 }
             }
-            KeyCode::Up => {
-                if self.selected_group > 0 {
-                    self.selected_group -= 1;
-                    self.selected_proxy = 0;
-                    // 切换组时启动异步延迟测试（不阻塞）
-                    self.start_delay_test(self.selected_group);
-                }
-            }
-            KeyCode::Down => {
-                if !self.proxies.is_empty() && self.selected_group < self.proxies.len() - 1 {
-                    self.selected_group += 1;
-                    self.selected_proxy = 0;
-                    // 切换组时启动异步延迟测试（不阻塞）
-                    self.start_delay_test(self.selected_group);
-                }
-            }
-            KeyCode::Left => {
-                if let Some((_, _proxies)) = self.proxies.get(self.selected_group) {
-                    if self.selected_proxy > 0 {
-                        self.selected_proxy -= 1;
-                    }
-                }
-            }
-            KeyCode::Right => {
-                if let Some((_, _proxies)) = self.proxies.get(self.selected_group) {
-                    if self.selected_proxy < self.proxies[self.selected_group].1.len().saturating_sub(1) {
-                        self.selected_proxy += 1;
-                    }
-                }
-            }
             _ => {}
         }
     }
@@ -355,7 +325,7 @@ async fn test_delays_impl(api_url: &str, proxy_names: &[String]) -> Vec<Option<u
             let client = client.clone();
 
             tokio::spawn(async move {
-                let encoded = percent_encode(&name_clone);
+                let encoded = percent_encode_path(&name_clone);
                 let url = format!(
                     "{}/proxies/{}/delay?url=http://www.gstatic.com/generate_204&timeout=3000",
                     api_url, encoded
@@ -390,15 +360,14 @@ async fn test_delays_impl(api_url: &str, proxy_names: &[String]) -> Vec<Option<u
     results
 }
 
-/// 简单的 URL 百分号编码
-fn percent_encode(input: &str) -> String {
-    let mut result = String::with_capacity(input.len() * 2);
+/// URL 路径百分号编码（用于 URL 路径部分，空格编码为 %20 而不是 +）
+fn percent_encode_path(input: &str) -> String {
+    let mut result = String::with_capacity(input.len() * 3);
     for byte in input.bytes() {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 result.push(byte as char);
             }
-            b' ' => result.push('+'),
             _ => {
                 result.push_str(&format!("%{:02X}", byte));
             }
