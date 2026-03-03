@@ -234,8 +234,8 @@ impl App {
             KeyCode::Char('q') => {
                 self.should_quit = true;
             }
-            KeyCode::Char('s') => {
-                // 只有 Selector 类型的代理组才允许手动切换
+            KeyCode::Char(' ') => {
+                // 空格键切换节点
                 if let Some(proxy_type) = self.proxy_types.get(self.selected_group) {
                     if *proxy_type == ProxyType::Selector {
                         if let Some((group, proxies)) = self.proxies.get(self.selected_group) {

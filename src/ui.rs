@@ -250,7 +250,7 @@ impl Ui {
                 Span::styled(" j/k ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
                 Span::raw(" up/down node "),
                 Span::raw(" | "),
-                Span::styled(" s ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                Span::styled(" Space ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
                 Span::raw(" switch "),
                 Span::raw(" | "),
                 Span::styled(" f ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
