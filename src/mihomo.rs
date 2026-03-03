@@ -9,12 +9,13 @@ pub struct Config {
     pub mode: String,
 }
 
+#[derive(Clone)]
 pub struct MihomoController {
     #[allow(dead_code)]
     mihomo_path: String,
     #[allow(dead_code)]
     config_path: String,
-    api_url: String,
+    pub(crate) api_url: String,
     client: Arc<reqwest::Client>,
 }
 
@@ -137,5 +138,81 @@ impl MihomoController {
             }
             Err(e) => Err(format!("Request failed: {}", e)),
         }
+    }
+
+    /// 获取指定代理节点的延迟
+    /// 返回延迟（毫秒），如果测试超时或失败返回 None
+    #[allow(dead_code)]
+    pub async fn get_proxy_delay(&self, proxy_name: &str) -> Option<u64> {
+        // URL 编码节点名称
+        let encoded_name = urlencoding::encode(proxy_name);
+        let url = format!(
+            "{}/proxies/{}/delay?url=http://www.gstatic.com/generate_204&timeout=3000",
+            self.api_url, encoded_name
+        );
+        let resp = self.client.get(&url).send().await;
+
+        match resp {
+            Ok(r) => {
+                if r.status().is_success() {
+                    #[derive(Deserialize)]
+                    struct DelayResponse {
+                        delay: Option<u64>,
+                    }
+                    if let Ok(data) = r.json::<DelayResponse>().await {
+                        data.delay
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            Err(_) => None,
+        }
+    }
+
+    /// 批量获取多个代理节点的延迟
+    #[allow(dead_code)]
+    pub async fn get_proxies_delay(&self, proxy_names: &[String]) -> Vec<Option<u64>> {
+        let mut futures = Vec::new();
+        for name in proxy_names {
+            let name_clone = name.clone();
+            let client = self.client.clone();
+            let api_url = self.api_url.clone();
+
+            let future = async move {
+                // URL 编码节点名称
+                let encoded_name = urlencoding::encode(&name_clone);
+                let url = format!(
+                    "{}/proxies/{}/delay?url=http://www.gstatic.com/generate_204&timeout=3000",
+                    api_url, encoded_name
+                );
+                let resp = client.get(&url).send().await;
+
+                match resp {
+                    Ok(r) => {
+                        if r.status().is_success() {
+                            #[derive(Deserialize)]
+                            struct DelayResponse {
+                                delay: Option<u64>,
+                            }
+                            if let Ok(data) = r.json::<DelayResponse>().await {
+                                data.delay
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    }
+                    Err(_) => None,
+                }
+            };
+            futures.push(future);
+        }
+
+        let results = futures::future::join_all(futures).await;
+        results.into_iter().map(|r| r).collect()
     }
 }

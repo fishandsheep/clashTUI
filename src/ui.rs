@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
 
@@ -32,13 +32,35 @@ impl Ui {
             _ => Color::Gray,
         };
 
+        // Mode description
+        let mode_hint = match app.mode.as_str() {
+            "rule" => " (Rule-based proxy)",
+            "global" => " (Use GLOBAL group)",
+            "direct" => " (Direct connection)",
+            _ => "",
+        };
+
         let header = Paragraph::new(vec![
             Line::from(vec![
-                Span::raw(" Mihomo TUI - Mode: "),
+                // Left: shortcuts hint
+                Span::styled(" r:", Style::default().fg(Color::Green)),
+                Span::styled("Rule ", Style::default().fg(Color::Gray)),
+                Span::styled(" g:", Style::default().fg(Color::Yellow)),
+                Span::styled("Global ", Style::default().fg(Color::Gray)),
+                Span::styled(" d:", Style::default().fg(Color::Blue)),
+                Span::styled("Direct ", Style::default().fg(Color::Gray)),
+                Span::raw(" | "),
+                // Center: mode display
+                Span::raw(" Mode: "),
                 Span::styled(
                     app.mode.to_uppercase(),
                     Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
                 ),
+                Span::styled(
+                    mode_hint,
+                    Style::default().fg(Color::Gray),
+                ),
+                Span::raw(" "),
             ]),
         ])
         .block(
@@ -62,6 +84,9 @@ impl Ui {
     }
 
     fn draw_groups(f: &mut Frame, area: Rect, app: &App) {
+        // Highlight GLOBAL group in global mode
+        let is_global_mode = app.mode == "global";
+
         let items: Vec<ListItem> = app
             .proxies
             .iter()
@@ -69,23 +94,37 @@ impl Ui {
             .map(|(i, (name, _))| {
                 let proxy_type = app.proxy_types.get(i).copied().unwrap_or(ProxyType::Selector);
                 let is_selected = i == app.selected_group;
+                let is_last_updated = app.last_updated_group == Some(i);
+                let is_global_group = is_global_mode && name == "GLOBAL";
 
-                // 根据类型设置颜色
+                // Set color based on state
                 let (name_color, marker_color) = if is_selected {
                     (Color::Green, Color::Green)
+                } else if is_global_group {
+                    // GLOBAL group highlighted in cyan in global mode
+                    (Color::Cyan, Color::Cyan)
+                } else if is_last_updated {
+                    (Color::Yellow, Color::Yellow)
                 } else {
-                    match proxy_type {
-                        ProxyType::Selector => (Color::White, Color::Cyan),
-                        ProxyType::UrlTest => (Color::Gray, Color::Yellow),
-                        ProxyType::Fallback => (Color::Gray, Color::Magenta),
-                    }
+                    // Selector type
+                    (Color::White, Color::Cyan)
                 };
 
                 let style = Style::default().fg(name_color);
                 let marker_style = Style::default().fg(marker_color);
 
+                // Add [ACTIVE] mark for GLOBAL group in global mode
+                let mark = if is_global_group {
+                    "[ACTIVE] "
+                } else if is_last_updated {
+                    "★ "
+                } else {
+                    ""
+                };
+
                 ListItem::new(vec![
                     Line::from(vec![
+                        Span::styled(mark.to_string(), Style::default().fg(Color::Cyan)),
                         Span::styled(proxy_type.marker(), marker_style.add_modifier(Modifier::BOLD)),
                         Span::raw(" "),
                         Span::styled(name.clone(), if is_selected { style.add_modifier(Modifier::BOLD) } else { style }),
@@ -99,7 +138,7 @@ impl Ui {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::Cyan))
-                    .title(" Groups [S=可切换 A=自动 F=故障转移] ")
+                    .title(" Groups [S=Selectable] ")
             )
             .highlight_style(
                 Style::default()
@@ -112,8 +151,12 @@ impl Ui {
 
     fn draw_proxies(f: &mut Frame, area: Rect, app: &App) {
         if let Some((group_name, proxies)) = app.proxies.get(app.selected_group) {
-            // 获取当前组选中的节点名称
+            // Get current group selected node and delays
             let current_proxy = app.current_proxies.get(app.selected_group);
+            let delays = app.proxy_delays.get(app.selected_group);
+
+            // Calculate available height (minus borders)
+            let available_height = area.height.saturating_sub(2) as usize;
 
             let items: Vec<ListItem> = proxies
                 .iter()
@@ -121,6 +164,25 @@ impl Ui {
                 .map(|(i, name)| {
                     let is_selected = i == app.selected_proxy;
                     let is_current = current_proxy.map_or(false, |cp| cp == name);
+
+                    // Get delay info
+                    let delay = delays.and_then(|d| d.get(i)).copied().flatten();
+
+                    // Set color based on delay
+                    let delay_color = delay.map_or(Color::DarkGray, |d| {
+                        if d < 200 {
+                            Color::Green
+                        } else if d < 500 {
+                            Color::Yellow
+                        } else {
+                            Color::Red
+                        }
+                    });
+
+                    let delay_str = delay.map_or_else(
+                        || " -- ".to_string(),
+                        |d| format!(" {:3}ms", d),
+                    );
 
                     let style = if is_selected {
                         Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
@@ -130,16 +192,29 @@ impl Ui {
                         Style::default().fg(Color::White)
                     };
 
-                    // 当前选中的节点前面添加 [✓] 标识
-                    let display_name = if is_current {
-                        format!("[✓] {}", name)
-                    } else {
-                        format!("    {}", name)
-                    };
+                    // Add [✓] mark for currently selected node
+                    let prefix = if is_current { "[✓]" } else { "   " };
 
-                    ListItem::new(vec![Line::styled(display_name, style)])
+                    ListItem::new(vec![
+                        Line::from(vec![
+                            Span::styled(prefix, Style::default().fg(Color::Cyan)),
+                            Span::styled(format!(" {} ", name), style),
+                            Span::styled(delay_str, Style::default().fg(delay_color)),
+                        ])
+                    ])
                 })
                 .collect();
+
+            // Calculate scroll offset to ensure selected item is visible
+            let offset = if items.len() <= available_height {
+                0
+            } else if app.selected_proxy >= available_height - 1 {
+                app.selected_proxy.saturating_sub(available_height) + 1
+            } else {
+                0
+            };
+
+            let mut list_state = ListState::default().with_offset(offset).with_selected(Some(app.selected_proxy));
 
             let list = List::new(items)
                 .block(
@@ -154,7 +229,7 @@ impl Ui {
                         .add_modifier(Modifier::BOLD),
                 );
 
-            f.render_widget(list, area);
+            f.render_stateful_widget(list, area, &mut list_state);
         } else {
             let empty = Paragraph::new("No proxies available")
                 .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan)))
@@ -169,21 +244,24 @@ impl Ui {
                 Span::styled(" q ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
                 Span::raw(" quit "),
                 Span::raw(" | "),
-                Span::styled(" ↑↓ ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::raw(" select group "),
+                Span::styled(" Tab ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw(" next group "),
                 Span::raw(" | "),
-                Span::styled(" ←→ ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::raw(" select node "),
+                Span::styled(" j/k ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw(" up/down node "),
                 Span::raw(" | "),
                 Span::styled(" s ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::raw(" switch node "),
+                Span::raw(" switch "),
+                Span::raw(" | "),
+                Span::styled(" f ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+                Span::raw(" refresh delays "),
             ]),
             Line::from(vec![
                 Span::styled(" r ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::raw(" rule mode "),
+                Span::raw(" rule "),
                 Span::raw(" | "),
                 Span::styled(" g ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                Span::raw(" global mode "),
+                Span::raw(" global "),
                 Span::raw(" | "),
                 Span::styled(" d ", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
                 Span::raw(" direct mode "),
