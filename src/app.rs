@@ -187,68 +187,20 @@ impl App {
 
     /// 启动异步延迟测试（不阻塞）
     fn start_delay_test(&self, group_index: usize) {
-        if let Some((group_name, proxy_names)) = self.proxies.get(group_index) {
-            let _group_name = group_name.clone();
+        if let Some((_group_name, proxy_names)) = self.proxies.get(group_index) {
             let proxy_names = proxy_names.clone();
             let tx = self.delay_result_tx.clone();
             let api_url = self.controller.api_url.clone();
 
             // 在后台异步执行延迟测试
             tokio::spawn(async move {
-                let delays = Self::test_delays_impl(&api_url, &proxy_names).await;
+                let delays = test_delays_impl(&api_url, &proxy_names).await;
                 let _ = tx.send(DelayTestResult {
                     group_index,
                     delays,
                 });
             });
         }
-    }
-
-    /// 延迟测试的实际实现（在后台任务中执行）
-    async fn test_delays_impl(api_url: &str, proxy_names: &[String]) -> Vec<Option<u64>> {
-        let mut futures = Vec::new();
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .build()
-            .unwrap();
-
-        for name in proxy_names {
-            let name_clone = name.clone();
-            let api_url = api_url.to_string();
-            let client = client.clone();
-
-            let future = async move {
-                let encoded_name = urlencoding::encode(&name_clone);
-                let url = format!(
-                    "{}/proxies/{}/delay?url=http://www.gstatic.com/generate_204&timeout=3000",
-                    api_url, encoded_name
-                );
-                let resp = client.get(&url).send().await;
-
-                match resp {
-                    Ok(r) => {
-                        if r.status().is_success() {
-                            #[derive(serde::Deserialize)]
-                            struct DelayResponse {
-                                delay: Option<u64>,
-                            }
-                            if let Ok(data) = r.json::<DelayResponse>().await {
-                                data.delay
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    }
-                    Err(_) => None,
-                }
-            };
-            futures.push(future);
-        }
-
-        let results = futures::future::join_all(futures).await;
-        results.into_iter().map(|r| r).collect()
     }
 
     /// 刷新所有代理组的延迟测试
@@ -262,7 +214,7 @@ impl App {
             let idx = group_index;
 
             tokio::spawn(async move {
-                let delays = Self::test_delays_impl(&api_url, &proxy_names).await;
+                let delays = test_delays_impl(&api_url, &proxy_names).await;
                 let _ = tx_clone.send(DelayTestResult {
                     group_index: idx,
                     delays,
@@ -320,10 +272,6 @@ impl App {
                     let _ = controller.switch_mode("direct").await;
                 });
             }
-            // f 键刷新所有组的延迟
-            KeyCode::Char('f') => {
-                self.refresh_all_delays();
-            }
             // Tab 键循环切换代理组
             KeyCode::Tab => {
                 if !self.proxies.is_empty() {
@@ -332,6 +280,10 @@ impl App {
                     // 切换组时启动异步延迟测试（不阻塞）
                     self.start_delay_test(self.selected_group);
                 }
+            }
+            // f 键刷新所有组的延迟
+            KeyCode::Char('f') => {
+                self.refresh_all_delays();
             }
             // j/k 键上下移动节点（vim 风格）
             KeyCode::Char('j') => {
@@ -385,4 +337,72 @@ impl App {
             _ => {}
         }
     }
+}
+
+/// 延迟测试的实际实现（在后台任务中执行）
+async fn test_delays_impl(api_url: &str, proxy_names: &[String]) -> Vec<Option<u64>> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap();
+
+    // 创建所有任务
+    let tasks: Vec<_> = proxy_names
+        .iter()
+        .map(|name| {
+            let name_clone = name.clone();
+            let api_url = api_url.to_string();
+            let client = client.clone();
+
+            tokio::spawn(async move {
+                let encoded = percent_encode(&name_clone);
+                let url = format!(
+                    "{}/proxies/{}/delay?url=http://www.gstatic.com/generate_204&timeout=3000",
+                    api_url, encoded
+                );
+
+                match client.get(&url).send().await {
+                    Ok(r) if r.status().is_success() => {
+                        if let Ok(body) = r.text().await {
+                            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&body) {
+                                data.get("delay").and_then(|d| d.as_u64())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                }
+            })
+        })
+        .collect();
+
+    // 等待所有任务完成
+    let mut results = vec![None; proxy_names.len()];
+    for (i, task) in tasks.into_iter().enumerate() {
+        if let Ok(delay) = task.await {
+            results[i] = delay;
+        }
+    }
+
+    results
+}
+
+/// 简单的 URL 百分号编码
+fn percent_encode(input: &str) -> String {
+    let mut result = String::with_capacity(input.len() * 2);
+    for byte in input.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                result.push(byte as char);
+            }
+            b' ' => result.push('+'),
+            _ => {
+                result.push_str(&format!("%{:02X}", byte));
+            }
+        }
+    }
+    result
 }

@@ -29,8 +29,8 @@ impl MihomoController {
             .unwrap();
 
         Self {
-            mihomo_path: shellexpand::tilde(mihomo_path).to_string(),
-            config_path: shellexpand::tilde(config_path).to_string(),
+            mihomo_path: expand_tilde(mihomo_path),
+            config_path: expand_tilde(config_path),
             api_url: format!("http://{}", MIHOMO_API_ADDR),
             client: Arc::new(client),
         }
@@ -76,12 +76,18 @@ impl MihomoController {
         match resp {
             Ok(r) => {
                 if r.status().is_success() {
-                    #[derive(Deserialize)]
-                    struct ProxiesResponse {
-                        proxies: HashMap<String, serde_json::Value>,
+                    let body = r.text().await.map_err(|e| format!("Read error: {}", e))?;
+                    let data: serde_json::Value = serde_json::from_str(&body)
+                        .map_err(|e| format!("JSON parse error: {}", e))?;
+                    if let Some(proxies) = data.get("proxies").and_then(|v| v.as_object()) {
+                        let mut result = HashMap::new();
+                        for (k, v) in proxies {
+                            result.insert(k.clone(), v.clone());
+                        }
+                        Ok(result)
+                    } else {
+                        Err("Invalid response format".to_string())
                     }
-                    let data: ProxiesResponse = r.json().await.map_err(|e| format!("JSON parse error: {}", e))?;
-                    Ok(data.proxies)
                 } else {
                     Err(format!("API error: {}", r.status()))
                 }
@@ -92,8 +98,8 @@ impl MihomoController {
 
     pub async fn select_proxy(&self, group: &str, proxy: &str) -> Result<(), String> {
         let url = format!("{}/proxies/{}", self.api_url, group);
-        let body = serde_json::json!({ "name": proxy });
-        let resp = self.client.put(&url).json(&body).send().await;
+        let body = serde_json::json!({ "name": proxy }).to_string();
+        let resp = self.client.put(&url).header("content-type", "application/json").body(body).send().await;
 
         match resp {
             Ok(r) => {
@@ -109,8 +115,8 @@ impl MihomoController {
 
     pub async fn switch_mode(&self, mode: &str) -> Result<(), String> {
         let url = format!("{}/configs", self.api_url);
-        let body = serde_json::json!({ "mode": mode });
-        let resp = self.client.patch(&url).json(&body).send().await;
+        let body = serde_json::json!({ "mode": mode }).to_string();
+        let resp = self.client.patch(&url).header("content-type", "application/json").body(body).send().await;
 
         match resp {
             Ok(r) => {
@@ -131,7 +137,8 @@ impl MihomoController {
         match resp {
             Ok(r) => {
                 if r.status().is_success() {
-                    r.json().await.map_err(|e| format!("JSON parse error: {}", e))
+                    let body = r.text().await.map_err(|e| format!("Read error: {}", e))?;
+                    serde_json::from_str(&body).map_err(|e| format!("JSON parse error: {}", e))
                 } else {
                     Err(format!("API error: {}", r.status()))
                 }
@@ -140,79 +147,79 @@ impl MihomoController {
         }
     }
 
-    /// 获取指定代理节点的延迟
-    /// 返回延迟（毫秒），如果测试超时或失败返回 None
-    #[allow(dead_code)]
-    pub async fn get_proxy_delay(&self, proxy_name: &str) -> Option<u64> {
-        // URL 编码节点名称
-        let encoded_name = urlencoding::encode(proxy_name);
-        let url = format!(
-            "{}/proxies/{}/delay?url=http://www.gstatic.com/generate_204&timeout=3000",
-            self.api_url, encoded_name
-        );
-        let resp = self.client.get(&url).send().await;
-
-        match resp {
-            Ok(r) => {
-                if r.status().is_success() {
-                    #[derive(Deserialize)]
-                    struct DelayResponse {
-                        delay: Option<u64>,
-                    }
-                    if let Ok(data) = r.json::<DelayResponse>().await {
-                        data.delay
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            }
-            Err(_) => None,
-        }
-    }
-
     /// 批量获取多个代理节点的延迟
     #[allow(dead_code)]
     pub async fn get_proxies_delay(&self, proxy_names: &[String]) -> Vec<Option<u64>> {
-        let mut futures = Vec::new();
-        for name in proxy_names {
-            let name_clone = name.clone();
-            let client = self.client.clone();
-            let api_url = self.api_url.clone();
+        let mut result = vec![None; proxy_names.len()];
 
-            let future = async move {
-                // URL 编码节点名称
-                let encoded_name = urlencoding::encode(&name_clone);
-                let url = format!(
-                    "{}/proxies/{}/delay?url=http://www.gstatic.com/generate_204&timeout=3000",
-                    api_url, encoded_name
-                );
-                let resp = client.get(&url).send().await;
+        // 使用 tokio 的 spawn 来并行测试，避免阻塞
+        let tasks: Vec<_> = proxy_names
+            .iter()
+            .enumerate()
+            .map(|(_i, name)| {
+                let name_clone = name.clone();
+                let client = self.client.clone();
+                let api_url = self.api_url.clone();
 
-                match resp {
-                    Ok(r) => {
-                        if r.status().is_success() {
-                            #[derive(Deserialize)]
-                            struct DelayResponse {
-                                delay: Option<u64>,
-                            }
-                            if let Ok(data) = r.json::<DelayResponse>().await {
-                                data.delay
+                tokio::spawn(async move {
+                    let encoded = percent_encode(&name_clone);
+                    let url = format!(
+                        "{}/proxies/{}/delay?url=http://www.gstatic.com/generate_204&timeout=3000",
+                        api_url, encoded
+                    );
+
+                    match client.get(&url).send().await {
+                        Ok(r) if r.status().is_success() => {
+                            if let Ok(body) = r.text().await {
+                                if let Ok(data) = serde_json::from_str::<serde_json::Value>(&body) {
+                                    data.get("delay").and_then(|d| d.as_u64())
+                                } else {
+                                    None
+                                }
                             } else {
                                 None
                             }
-                        } else {
-                            None
                         }
+                        _ => None,
                     }
-                    Err(_) => None,
-                }
-            };
-            futures.push(future);
+                })
+            })
+            .collect();
+
+        // 等待所有任务完成
+        for (i, task) in tasks.into_iter().enumerate() {
+            if let Ok(delay) = task.await {
+                result[i] = delay;
+            }
         }
 
-        let results = futures::future::join_all(futures).await;
-        results.into_iter().map(|r| r).collect()
+        result
     }
+}
+
+/// 简单的 URL 百分号编码
+fn percent_encode(input: &str) -> String {
+    let mut result = String::with_capacity(input.len() * 2);
+    for byte in input.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                result.push(byte as char);
+            }
+            b' ' => result.push('+'),
+            _ => {
+                result.push_str(&format!("%{:02X}", byte));
+            }
+        }
+    }
+    result
+}
+
+/// 展开 ~ 为用户主目录
+fn expand_tilde(path: &str) -> String {
+    if path.starts_with("~/") || path == "~" {
+        if let Some(home) = std::env::var("HOME").ok().or_else(|| std::env::var("USERPROFILE").ok()) {
+            return path.replacen("~", &home, 1);
+        }
+    }
+    path.to_string()
 }
